@@ -9,7 +9,7 @@ int latchPin = 10;
 const uint8_t SHIFT_ORDER = MSBFIRST; // try MSBFIRST if bits appear reversed
 const bool INVERT_OUTPUTS = false;    // true if LED ON == output LOW (common-anode)
 
-// Standard mapping: bit0 = dot1, bit1 = dot2, ... bit5 = dot6
+// Standard mapping: bit0 = dot1, bit1 = dot2, ... bit5 = dot6 (first 74HC595 - nearest to MCU)
 const uint8_t DOT1 = 1<<0;
 const uint8_t DOT2 = 1<<1;
 const uint8_t DOT3 = 1<<2;
@@ -17,10 +17,33 @@ const uint8_t DOT4 = 1<<3;
 const uint8_t DOT5 = 1<<4;
 const uint8_t DOT6 = 1<<5;
 
+// Second (separate) 74HC595 (chained): we will use bits 0..6 there to drive a 7-segment display (a..g).
+// If you wired differently, change these segment bit definitions to match Q0..Q7 connections.
+const uint8_t SEG_A  = 1<<0; // second chip Q0
+const uint8_t SEG_B  = 1<<1; // second chip Q1
+const uint8_t SEG_C  = 1<<2; // second chip Q2
+const uint8_t SEG_D  = 1<<3; // second chip Q3
+const uint8_t SEG_E  = 1<<4; // second chip Q4
+const uint8_t SEG_F  = 1<<5; // second chip Q5
+const uint8_t SEG_G  = 1<<6; // second chip Q6
+const uint8_t SEG_DP = 1<<7; // optional decimal point on Q7
+
 // Hard-coded character to display after diagnostics
-const char DISPLAY_CHAR = 'z';
+const char DISPLAY_CHAR = 'a';
 const uint8_t OE_PIN = 4;     // wire 74HC595 /OE to Arduino D4 (or set 255 if tied to GND)
 const uint8_t SRCLR_PIN = 5;  // wire 74HC595 /SRCLR (MR) to Arduino D5 (or set 255 if tied to VCC)
+
+// Rotary encoder pins and state (uses D2/D3)
+const uint8_t ENC_PIN_A = 2;
+const uint8_t ENC_PIN_B = 3;
+volatile int encoderPos = 0;
+volatile bool encoderMoved = false;
+const int ENC_MIN = 0;
+const int ENC_MAX = 9;
+
+// runtime state (so we don't overwrite braille when updating number)
+uint8_t currentBraillePattern = 0; // byte for first (nearest) 74HC595
+uint8_t currentNumberPattern = 0;  // byte for second (farthest) 74HC595
 
 void setup() {
   Serial.begin(115200);
@@ -32,39 +55,67 @@ void setup() {
   if (OE_PIN != 255) { pinMode(OE_PIN, OUTPUT); digitalWrite(OE_PIN, LOW); }    // enable outputs
   if (SRCLR_PIN != 255) { pinMode(SRCLR_PIN, OUTPUT); digitalWrite(SRCLR_PIN, HIGH); } // not cleared
 
-  // Force-clear shift register outputs (guarantee known state)
+  // Force-clear shift registers outputs (guarantee known state on both chained chips)
   digitalWrite(latchPin, LOW);
-  shiftOut(dataPin, clockPin, SHIFT_ORDER, 0x00); // all zeros -> all ULN inputs LOW -> LEDs off (if ULN sinks on HIGH)
+  // send two bytes: first byte goes to farthest chip, second to nearest (we clear both)
+  shiftOut(dataPin, clockPin, SHIFT_ORDER, 0x00); // farthest (second) 595
+  shiftOut(dataPin, clockPin, SHIFT_ORDER, 0x00); // nearest (first) 595 (braille)
   digitalWrite(latchPin, HIGH);
   delay(50);
 
-  Serial.println("Starting single-bit diagnostic: pulses 0..5 (dot1..dot6).");
-  //  performSingleBitTest(); // disabled: comment out to stop the sequential pulses
+  // set up encoder inputs (use internal pullups)
+  pinMode(ENC_PIN_A, INPUT_PULLUP);
+  pinMode(ENC_PIN_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_PIN_A), encoderISR, CHANGE);
 
-  // then display hard-coded char
+  Serial.println("Starting single-bit diagnostic: pulses 0..5 (dot1..dot6).");
+  // performSingleBitTest(); // disabled by default
+
+  // display hard-coded char (store and update safely)
   uint8_t pat = patternForChar(DISPLAY_CHAR);
   if (pat == 0xFF) { Serial.println("Character not found — clearing display."); pat = 0x00; }
   Serial.print("Displaying (hard-coded): "); Serial.println(DISPLAY_CHAR);
-  shiftOutCharPattern(pat);
+  currentBraillePattern = pat;
+
+  // show initial encoder value on number register (does not clobber braille)
+  currentNumberPattern = patternForNumberDisplay(encoderPos);
+
+  updateOutputs();
 }
 
 void loop() {
-  // static display
-  delay(1000);
+  // update display when encoder changes
+  if (encoderMoved) {
+    noInterrupts();
+    int val = encoderPos;
+    encoderMoved = false;
+    interrupts();
+    currentNumberPattern = patternForNumberDisplay(val);
+    updateOutputs();
+    Serial.print("Encoder -> ");
+    Serial.println(val);
+  }
+  // small idle sleep
+  delay(10);
 }
 
 void performSingleBitTest() {
+  // test braille bits only (first/nearest 74HC595), keep number register off
   for (uint8_t bit = 0; bit < 6; ++bit) {
     uint8_t pattern = (1 << bit);
     Serial.print("Test bit ");
     Serial.print(bit);
     Serial.print(" -> pattern 0b");
     Serial.println(pattern, BIN);
-    shiftOutCharPattern(pattern);
+    currentBraillePattern = pattern;
+    currentNumberPattern = 0x00;
+    updateOutputs();
     delay(800);
   }
   // clear after test
-  shiftOutCharPattern(0x00);
+  currentBraillePattern = 0x00;
+  currentNumberPattern = 0x00;
+  updateOutputs();
   delay(300);
 }
 
@@ -100,11 +151,65 @@ uint8_t patternForChar(char c) {
   }
 }
 
-void shiftOutCharPattern(uint8_t value) {
-  if (INVERT_OUTPUTS) value = ~value;
+// update both chained 74HC595 outputs at once:
+// - first byte shifted becomes the farthest (second) 74HC595
+// - second byte shifted becomes the nearest (first) 74HC595 (braille)
+void updateOutputs() {
+  uint8_t numberByte = currentNumberPattern;
+  uint8_t brailleByte = currentBraillePattern;
+
+  uint8_t outNumber = numberByte;
+  uint8_t outBraille = brailleByte;
+  if (INVERT_OUTPUTS) {
+    outNumber = ~outNumber;
+    outBraille = ~outBraille;
+  }
+
   digitalWrite(latchPin, LOW);
-  shiftOut(dataPin, clockPin, SHIFT_ORDER, value);
+  // shift order: send farthest first (number register), then nearest (braille)
+  shiftOut(dataPin, clockPin, SHIFT_ORDER, outNumber);
+  shiftOut(dataPin, clockPin, SHIFT_ORDER, outBraille);
   digitalWrite(latchPin, HIGH);
-  Serial.print("Shifted out: 0b");
-  Serial.println(value, BIN);
+
+  Serial.print("Number reg: 0b");
+  Serial.print(numberByte, BIN);
+  Serial.print("  Braille reg: 0b");
+  Serial.print(brailleByte, BIN);
+  Serial.print("  (sent number then braille)");
+  Serial.println();
+}
+
+// simple encoder ISR: when A changes, read B to determine direction
+void encoderISR() {
+  uint8_t a = digitalRead(ENC_PIN_A);
+  uint8_t b = digitalRead(ENC_PIN_B);
+  if (a == b) { // one direction (clockwise)
+    if (encoderPos < ENC_MAX) ++encoderPos;
+  } else {      // other direction (counter-clockwise)
+    if (encoderPos > ENC_MIN) --encoderPos;
+  }
+  encoderMoved = true;
+}
+
+// map a number (0-9) to a pattern placed into the second (farthest) 74HC595.
+// Standard 7-segment (segments a..g). '1' lights segments B and C, etc.
+// Adjust values if your segment wiring order is different.
+uint8_t patternForNumberDisplay(int n) {
+  if (n < 0) n = 0;
+  if (n > 9) n = 9;
+  static const uint8_t segDigits[10] = {
+    // gfedcba  (bit order shown: SEG_G..SEG_A)
+    // We build in SEG_* order (a = LSB)
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,          // 0
+    SEG_B | SEG_C,                                          // 1
+    SEG_A | SEG_B | SEG_D | SEG_E | SEG_G,                  // 2
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_G,                  // 3
+    SEG_F | SEG_G | SEG_B | SEG_C,                          // 4
+    SEG_A | SEG_F | SEG_G | SEG_C | SEG_D,                  // 5
+    SEG_A | SEG_F | SEG_E | SEG_D | SEG_C | SEG_G,          // 6
+    SEG_A | SEG_B | SEG_C,                                  // 7
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,  // 8
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G           // 9
+  };
+  return segDigits[n];
 }
