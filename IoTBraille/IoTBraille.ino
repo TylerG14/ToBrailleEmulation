@@ -41,9 +41,19 @@ volatile bool encoderMoved = false;
 const int ENC_MIN = 0;
 const int ENC_MAX = 9;
 
+// Keypad (4x3) wiring (match your SimulIDE layout)
+// rows = pins on left of keypad part (drive LOW one row at a time)
+const uint8_t KEYPAD_ROW_PINS[4] = {6, 7, 11, 12};  // top -> bottom on part
+const uint8_t KEYPAD_COL_PINS[3] = {A0, A1, A2};    // columns (use INPUT_PULLUP)
+const char KEYPAD_MAP[12] = { '1','2','3','4','5','6','7','8','9','*','0','#' };
+const uint8_t KEYPAD_ROWS = 4;
+const uint8_t KEYPAD_COLS = 3;
+const uint8_t KEY_INDICATOR_PIN = LED_BUILTIN; // visual output when a key is pressed
+
 // runtime state (so we don't overwrite braille when updating number)
 uint8_t currentBraillePattern = 0; // byte for first (nearest) 74HC595
 uint8_t currentNumberPattern = 0;  // byte for second (farthest) 74HC595
+char lastKey = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -67,6 +77,17 @@ void setup() {
   pinMode(ENC_PIN_A, INPUT_PULLUP);
   pinMode(ENC_PIN_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENC_PIN_A), encoderISR, CHANGE);
+
+  // --- keypad init ---
+  pinMode(KEY_INDICATOR_PIN, OUTPUT);
+  digitalWrite(KEY_INDICATOR_PIN, LOW);
+  for (uint8_t c = 0; c < KEYPAD_COLS; ++c) {
+    pinMode(KEYPAD_COL_PINS[c], INPUT_PULLUP);
+  }
+  for (uint8_t r = 0; r < KEYPAD_ROWS; ++r) {
+    pinMode(KEYPAD_ROW_PINS[r], OUTPUT);
+    digitalWrite(KEYPAD_ROW_PINS[r], HIGH); // inactive
+  }
 
   Serial.println("Starting single-bit diagnostic: pulses 0..5 (dot1..dot6).");
   // performSingleBitTest(); // disabled by default
@@ -95,6 +116,25 @@ void loop() {
     Serial.print("Encoder -> ");
     Serial.println(val);
   }
+
+  // --- keypad handling: visual + serial + show digit on 7-seg if numeric ---
+  char k = keypadScan(); // returns 0 if none
+  if (k != 0) {
+    digitalWrite(KEY_INDICATOR_PIN, HIGH);
+    if (k != lastKey) {
+      lastKey = k;
+      Serial.print("Key pressed: ");
+      Serial.println(k);
+      if (k >= '0' && k <= '9') {
+        currentNumberPattern = patternForNumberDisplay(k - '0');
+        updateOutputs();
+      }
+    }
+  } else {
+    digitalWrite(KEY_INDICATOR_PIN, LOW);
+    if (lastKey != 0) { lastKey = 0; } // reset
+  }
+
   // small idle sleep
   delay(10);
 }
@@ -189,6 +229,28 @@ void encoderISR() {
     if (encoderPos > ENC_MIN) --encoderPos;
   }
   encoderMoved = true;
+}
+
+// scan 4x3 keypad matrix and return the mapped char, or 0 if none
+char keypadScan() {
+  for (uint8_t r = 0; r < KEYPAD_ROWS; ++r) {
+    digitalWrite(KEYPAD_ROW_PINS[r], LOW);      // activate row
+    delayMicroseconds(5);                       // allow settle
+    for (uint8_t c = 0; c < KEYPAD_COLS; ++c) {
+      if (digitalRead(KEYPAD_COL_PINS[c]) == LOW) {
+        delay(12); // debounce
+        bool still = (digitalRead(KEYPAD_COL_PINS[c]) == LOW);
+        digitalWrite(KEYPAD_ROW_PINS[r], HIGH); // deactivate before returning
+        if (still) {
+          uint8_t idx = r * KEYPAD_COLS + c;
+          if (idx < sizeof(KEYPAD_MAP)) return KEYPAD_MAP[idx];
+          return 0;
+        }
+      }
+    }
+    digitalWrite(KEYPAD_ROW_PINS[r], HIGH);     // deactivate row
+  }
+  return 0;
 }
 
 // map a number (0-9) to a pattern placed into the second (farthest) 74HC595.
