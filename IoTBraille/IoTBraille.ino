@@ -58,12 +58,12 @@ const uint8_t KEY_INDICATOR_PIN = LED_BUILTIN;
 uint8_t currentBraillePattern = 0;
 uint8_t currentNumberPattern = 0;
 char lastKey = 0;
-bool keypadMode = true;        // when true, keypad drives braille
-bool brailleIsNumeric = false;   // true only when braille was intentionally set to a digit
+bool keypadMode = true;        // when true, keypad drives braille (Can change)
+bool brailleIsNumeric = false;   // true only when braille was intentionally set to a digit(Can Change)
 
 // Speaker (piezo) on A3; used to distinguish numeric-mode braille from letters
 const uint8_t SPEAKER_PIN = A3;
-bool speakerOn = false; // start false so tone() can be started when needed
+bool speakerOn = false; // start false so tone() can be started when needed(Don't change)
 
 /* -------------------------
    Initialization
