@@ -1,2 +1,2 @@
-# ToBrailleEmulation
-This is a backup of the emulation such that we can distribute the software for our demo 
+# IoTBrailleEmulation
+This is an emulation of hardware for 3d printed Braille Display that can controll IoT devices. This is a stand in for the lacking hardware for our demo.
