@@ -50,10 +50,16 @@ const uint8_t KEYPAD_ROWS = 4;
 const uint8_t KEYPAD_COLS = 3;
 const uint8_t KEY_INDICATOR_PIN = LED_BUILTIN; // visual output when a key is pressed
 
+// Speaker (piezo) pinned to A3 (change if you prefer different Arduino pin)
+const uint8_t SPEAKER_PIN = A3;
+
 // runtime state (so we don't overwrite braille when updating number)
 uint8_t currentBraillePattern = 0; // byte for first (nearest) 74HC595
 uint8_t currentNumberPattern = 0;  // byte for second (farthest) 74HC595
 char lastKey = 0;
+bool speakerOn = false;
+// New: track whether the current braille pattern is meant to be a numeric digit
+bool brailleIsNumeric = false;
 
 void setup() {
   Serial.begin(115200);
@@ -89,6 +95,10 @@ void setup() {
     digitalWrite(KEYPAD_ROW_PINS[r], HIGH); // inactive
   }
 
+  // speaker pin
+  pinMode(SPEAKER_PIN, OUTPUT);
+  digitalWrite(SPEAKER_PIN, LOW);
+
   Serial.println("Starting single-bit diagnostic: pulses 0..5 (dot1..dot6).");
   // performSingleBitTest(); // disabled by default
 
@@ -97,9 +107,12 @@ void setup() {
   if (pat == 0xFF) { Serial.println("Character not found — clearing display."); pat = 0x00; }
   Serial.print("Displaying (hard-coded): "); Serial.println(DISPLAY_CHAR);
   currentBraillePattern = pat;
+  // set numeric flag only if DISPLAY_CHAR is a digit
+  brailleIsNumeric = (DISPLAY_CHAR >= '0' && DISPLAY_CHAR <= '9');
 
   // show initial encoder value on number register (does not clobber braille)
-  currentNumberPattern = patternForNumberDisplay(encoderPos);
+  // do not display a number by default (avoids unwanted buzzer); encoder updates will set this
+  currentNumberPattern = 0x00;
 
   updateOutputs();
 }
@@ -135,6 +148,17 @@ void loop() {
     if (lastKey != 0) { lastKey = 0; } // reset
   }
 
+  // Speaker behavior: buzz only when the 6-LED braille pattern represents a number
+  bool shouldBuzz = brailleRepresentsDigit();
+  if (shouldBuzz && !speakerOn) {
+    // start continuous tone (frequency = 1000 Hz); change freq if desired
+    tone(SPEAKER_PIN, 1000);
+    speakerOn = true;
+  } else if (!shouldBuzz && speakerOn) {
+    noTone(SPEAKER_PIN);
+    speakerOn = false;
+  }
+
   // small idle sleep
   delay(10);
 }
@@ -148,12 +172,15 @@ void performSingleBitTest() {
     Serial.print(" -> pattern 0b");
     Serial.println(pattern, BIN);
     currentBraillePattern = pattern;
+    // tests are not numeric
+    brailleIsNumeric = false;
     currentNumberPattern = 0x00;
     updateOutputs();
     delay(800);
   }
   // clear after test
   currentBraillePattern = 0x00;
+  brailleIsNumeric = false;
   currentNumberPattern = 0x00;
   updateOutputs();
   delay(300);
@@ -187,6 +214,16 @@ uint8_t patternForChar(char c) {
     case 'x': return DOT1|DOT3|DOT4|DOT6;      // 1,3,4,6
     case 'y': return DOT1|DOT3|DOT4|DOT5|DOT6; // 1,3,4,5,6
     case 'z': return DOT1|DOT3|DOT5|DOT6;      // 1,3,5,6
+    case '1': return DOT1;                     // 1
+    case '2': return DOT1|DOT2;                // 1,2
+    case '3': return DOT1|DOT4;                // 1,4
+    case '4': return DOT1|DOT4|DOT5;           // 1,4,5
+    case '5': return DOT1|DOT5;                // 1,5
+    case '6': return DOT1|DOT2|DOT4;           // 1,2,4
+    case '7': return DOT1|DOT2|DOT4|DOT5;      // 1,2,4,5
+    case '8': return DOT1|DOT2|DOT5;           // 1,2,5
+    case '9': return DOT2|DOT4;                // 2,4
+    case '0': return DOT2|DOT4|DOT5;           // 2,4,5
     default:  return 0xFF;
   }
 }
@@ -274,4 +311,15 @@ uint8_t patternForNumberDisplay(int n) {
     SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G           // 9
   };
   return segDigits[n];
+}
+
+// return true if currentBraillePattern equals any braille digit pattern (1..9,0)
+// and the display is currently in numeric mode.
+bool brailleRepresentsDigit() {
+  if (!brailleIsNumeric) return false;
+  for (char d = '1'; d <= '9'; ++d) {
+    if (currentBraillePattern == patternForChar(d)) return true;
+  }
+  if (currentBraillePattern == patternForChar('0')) return true;
+  return false;
 }
