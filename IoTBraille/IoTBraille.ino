@@ -54,6 +54,9 @@ const uint8_t KEY_INDICATOR_PIN = LED_BUILTIN; // visual output when a key is pr
 uint8_t currentBraillePattern = 0; // byte for first (nearest) 74HC595
 uint8_t currentNumberPattern = 0;  // byte for second (farthest) 74HC595
 char lastKey = 0;
+// New runtime flags
+bool keypadMode = true;        // when true, keypad drives braille; when false, uses DISPLAY_CHAR
+bool brailleIsNumeric = false; // true only when braille was intentionally set to a digit
 
 void setup() {
   Serial.begin(115200);
@@ -92,14 +95,22 @@ void setup() {
   Serial.println("Starting single-bit diagnostic: pulses 0..5 (dot1..dot6).");
   // performSingleBitTest(); // disabled by default
 
-  // display hard-coded char (store and update safely)
-  uint8_t pat = patternForChar(DISPLAY_CHAR);
-  if (pat == 0xFF) { Serial.println("Character not found — clearing display."); pat = 0x00; }
-  Serial.print("Displaying (hard-coded): "); Serial.println(DISPLAY_CHAR);
-  currentBraillePattern = pat;
+  // initialize braille depending on mode
+  if (keypadMode) {
+    Serial.println("Keypad mode active: braille will update from keypad.");
+    currentBraillePattern = 0x00;
+    brailleIsNumeric = false;
+  } else {
+    // display hard-coded char (store and update safely)
+    uint8_t pat = patternForChar(DISPLAY_CHAR);
+    if (pat == 0xFF) { Serial.println("Character not found — clearing display."); pat = 0x00; }
+    Serial.print("Displaying (hard-coded): "); Serial.println(DISPLAY_CHAR);
+    currentBraillePattern = pat;
+    brailleIsNumeric = (DISPLAY_CHAR >= '0' && DISPLAY_CHAR <= '9');
+  }
 
-  // show initial encoder value on number register (does not clobber braille)
-  currentNumberPattern = patternForNumberDisplay(encoderPos);
+  // leave number register blank initially; encoder will update when moved
+  currentNumberPattern = 0x00;
 
   updateOutputs();
 }
@@ -125,14 +136,47 @@ void loop() {
       lastKey = k;
       Serial.print("Key pressed: ");
       Serial.println(k);
-      if (k >= '0' && k <= '9') {
-        currentNumberPattern = patternForNumberDisplay(k - '0');
+      // update braille if keypad mode is enabled
+      if (keypadMode) {
+        uint8_t p = patternForKey(k);
+        currentBraillePattern = p;
+        brailleIsNumeric = (k >= '0' && k <= '9');
+        // optionally also show digit on 7-seg for numeric keys
+        if (k >= '0' && k <= '9') currentNumberPattern = patternForNumberDisplay(k - '0');
+        else currentNumberPattern = 0x00;
         updateOutputs();
+      } else {
+        // keypad pressed while in hard-coded mode: still show number on 7-seg for digits
+        if (k >= '0' && k <= '9') {
+          currentNumberPattern = patternForNumberDisplay(k - '0');
+          updateOutputs();
+        }
       }
     }
   } else {
     digitalWrite(KEY_INDICATOR_PIN, LOW);
     if (lastKey != 0) { lastKey = 0; } // reset
+  }
+
+  // Serial commands to switch modes at runtime:
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    if (cmd == 'H' || cmd == 'h') {
+      keypadMode = false;
+      uint8_t pat = patternForChar(DISPLAY_CHAR);
+      if (pat == 0xFF) pat = 0x00;
+      currentBraillePattern = pat;
+      brailleIsNumeric = (DISPLAY_CHAR >= '0' && DISPLAY_CHAR <= '9');
+      updateOutputs();
+      Serial.println("Switched to hard-coded DISPLAY_CHAR mode.");
+    } else if (cmd == 'K' || cmd == 'k') {
+      keypadMode = true;
+      currentBraillePattern = 0x00;
+      brailleIsNumeric = false;
+      currentNumberPattern = 0x00;
+      updateOutputs();
+      Serial.println("Switched to keypad mode.");
+    }
   }
 
   // small idle sleep
@@ -189,6 +233,29 @@ uint8_t patternForChar(char c) {
     case 'z': return DOT1|DOT3|DOT5|DOT6;      // 1,3,5,6
     default:  return 0xFF;
   }
+}
+
+// New helper: map a keypad key into a braille pattern.
+// digits 1..9,0 map to letters a..j (same dot patterns). '*' and '#' return custom patterns (0 = blank).
+uint8_t patternForKey(char k) {
+  if (k >= '1' && k <= '9') {
+    // '1' -> 'a', '2' -> 'b', ... '9' -> 'i'
+    char letter = 'a' + (k - '1');
+    return patternForChar(letter);
+  }
+  if (k == '0') {
+    // '0' maps to 'j'
+    return patternForChar('j');
+  }
+  if (k == '*') {
+    // a chosen visual pattern for '*' (set to something visible)
+    return DOT2 | DOT3 | DOT5 | DOT6;
+  }
+  if (k == '#') {
+    // a chosen visual pattern for '#'
+    return DOT3 | DOT4;
+  }
+  return 0x00;
 }
 
 // update both chained 74HC595 outputs at once:
